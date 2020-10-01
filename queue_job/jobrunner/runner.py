@@ -321,6 +321,11 @@ class Database(object):
             cr.execute(query, args)
             yield cr
 
+    def keep_alive(self):
+        query = "SELECT 1"
+        with closing(self.conn.cursor()) as cr:
+            cr.execute(query)
+
     def set_job_enqueued(self, uuid):
         with closing(self.conn.cursor()) as cr:
             cr.execute(
@@ -433,6 +438,12 @@ class QueueJobRunner(object):
 
     def process_notifications(self):
         for db in self.db_by_name.values():
+            if not db.conn.notifies:
+                # If there are no activity in the queue_job table it seems that
+                # tcp keepalives are not sent (in that very specific scenario),
+                # causing some intermediaries (such as haproxy) to close the
+                # connection, making the jobrunner to restart on a socket error
+                db.keep_alive()
             while db.conn.notifies:
                 if self._stop:
                     break
@@ -499,15 +510,14 @@ class QueueJobRunner(object):
                     self.wait_notification()
             except KeyboardInterrupt:
                 self.stop()
-            except Exception as e:
+            except InterruptedError:
                 # Interrupted system call, i.e. KeyboardInterrupt during select
-                if isinstance(e, select.error) and e[0] == 4:
-                    self.stop()
-                else:
-                    _logger.exception(
-                        "exception: sleeping %ds and retrying", ERROR_RECOVERY_DELAY
-                    )
-                    self.close_databases()
-                    time.sleep(ERROR_RECOVERY_DELAY)
+                self.stop()
+            except Exception:
+                _logger.exception(
+                    "exception: sleeping %ds and retrying", ERROR_RECOVERY_DELAY
+                )
+                self.close_databases()
+                time.sleep(ERROR_RECOVERY_DELAY)
         self.close_databases(remove_jobs=False)
         _logger.info("stopped")
