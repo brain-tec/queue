@@ -5,6 +5,7 @@ import functools
 import hashlib
 import inspect
 import logging
+import os
 import sys
 import uuid
 from datetime import datetime, timedelta
@@ -305,6 +306,7 @@ class Job(object):
         if stored.company_id:
             job_.company_id = stored.company_id.id
         job_.identity_key = stored.identity_key
+        job_.worker_pid = stored.worker_pid
         return job_
 
     def job_record_with_same_identity_key(self):
@@ -499,6 +501,7 @@ class Job(object):
         self._eta = None
         self.eta = eta
         self.channel = channel
+        self.worker_pid = None
 
     def perform(self):
         """Execute the job.
@@ -542,6 +545,7 @@ class Job(object):
             "date_done": False,
             "eta": False,
             "identity_key": False,
+            "worker_pid": self.worker_pid,
         }
 
         if self.date_enqueued:
@@ -648,6 +652,7 @@ class Job(object):
         self.state = PENDING
         self.date_enqueued = None
         self.date_started = None
+        self.worker_pid = None
         if reset_retry:
             self.retry = 0
         if result is not None:
@@ -657,10 +662,12 @@ class Job(object):
         self.state = ENQUEUED
         self.date_enqueued = datetime.now()
         self.date_started = None
+        self.worker_pid = None
 
     def set_started(self):
         self.state = STARTED
         self.date_started = datetime.now()
+        self.worker_pid = os.getpid()
 
     def set_done(self, result=None):
         self.state = DONE
@@ -841,15 +848,21 @@ def job(func=None, default_channel="root", retry_pattern=None):
     if retry_pattern:
         xml_fields.append('    <field name="retry_pattern">{retry_pattern}</field>')
 
-    xml_record = (
-        '<record id="job_function_[insert model]_{method}"'
-        ' model="queue.job.function">\n' + "\n".join(xml_fields) + "\n</record>"
-    ).format(**{"method": func.__name__, "retry_pattern": retry_pattern})
-    _logger.warning(
-        "@job is deprecated and no longer needed, if you need custom options, "
-        "use an XML record:\n%s",
-        xml_record,
+    _logger.info(
+        "@job is deprecated and no longer needed (on %s), it is advised to use an "
+        "XML record (activate DEBUG log for snippet)",
+        func.__name__,
     )
+    if _logger.isEnabledFor(logging.DEBUG):
+        xml_record = (
+            '<record id="job_function_[insert model]_{method}"'
+            ' model="queue.job.function">\n' + "\n".join(xml_fields) + "\n</record>"
+        ).format(**{"method": func.__name__, "retry_pattern": retry_pattern})
+        _logger.debug(
+            "XML snippet (to complete) for replacing @job on %s:\n%s",
+            func.__name__,
+            xml_record,
+        )
 
     def delay_from_model(*args, **kwargs):
         raise AttributeError(
@@ -951,16 +964,21 @@ def related_action(action=None, **kwargs):
             '    <field name="related_action">{related_action}</field>'
         )
 
-        xml_record = (
-            '<record id="job_function_[insert model]_{method}"'
-            ' model="queue.job.function">\n' + xml_fields + "\n</record>"
-        ).format(**{"method": func.__name__, "related_action": action})
-        _logger.warning(
-            "@related_action is deprecated and no longer needed,"
-            " add these options in a 'queue.job.function'"
-            " XML record:\n%s",
-            xml_record,
+        _logger.info(
+            "@related_action is deprecated and no longer needed (on %s),"
+            " it is advised to use an XML record (activate DEBUG log for snippet)",
+            func.__name__,
         )
+        if _logger.isEnabledFor(logging.DEBUG):
+            xml_record = (
+                '<record id="job_function_[insert model]_{method}"'
+                ' model="queue.job.function">\n' + xml_fields + "\n</record>"
+            ).format(**{"method": func.__name__, "related_action": action})
+            _logger.debug(
+                "XML snippet (to complete) for replacing @related_action on %s:\n%s",
+                func.__name__,
+                xml_record,
+            )
 
         func.related_action = action
         func.kwargs = kwargs
