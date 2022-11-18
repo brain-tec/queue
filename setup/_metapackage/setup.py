@@ -13,6 +13,7 @@ setuptools.setup(
         'odoo14-addon-queue_job_batch',
         'odoo14-addon-queue_job_context',
         'odoo14-addon-queue_job_cron',
+        'odoo14-addon-queue_job_cron_jobrunner',
         'odoo14-addon-queue_job_subscribe',
         'odoo14-addon-test_base_import_async',
         'odoo14-addon-test_queue_job',
