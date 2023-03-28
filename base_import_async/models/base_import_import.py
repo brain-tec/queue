@@ -32,10 +32,10 @@ DEFAULT_CHUNK_SIZE = 100
 class BaseImportImport(models.TransientModel):
     _inherit = "base_import.import"
 
-    def do(self, fields, columns, options, dryrun=False):
+    def execute_import(self, fields, columns, options, dryrun=False):
         if dryrun or not options.get(OPT_USE_QUEUE):
             # normal import
-            return super().do(fields, columns, options, dryrun=dryrun)
+            return super().execute_import(fields, columns, options, dryrun=dryrun)
 
         # asynchronous import
         try:
