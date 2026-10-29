@@ -525,7 +525,7 @@ class QueueJobRunner:
         else:
             self._metrics_server = None
             _logger.info("jobrunner metrics server not configured")
-        metrics.jobs_to_do.set_function(self.channel_manager._jobs_to_do_gauge)
+        metrics.jobs_to_do.set_function(self._jobs_to_do_gauge)
 
     def __del__(self):
         # pylint: disable=except-pass
@@ -670,7 +670,7 @@ class QueueJobRunner:
     def _notify_existing_jobs(self, db, channel_manager):
         with db.select_jobs("state in %s", (NOT_DONE,)) as cr:
             for job_data in cr:
-                channel_manager.notify(db.db_name, *job_data)
+                channel_manager.notify(*job_data)
 
     def initialize_databases(self):
         for db_name in sorted(self.get_db_names()):
@@ -685,6 +685,17 @@ class QueueJobRunner:
                 _logger.info("queue job runner ready for db %s", db_name)
             else:
                 db.close()
+
+    def _jobs_to_do_gauge(self) -> float:
+        """Return the total number of jobs to do across all databases."""
+        total = 0
+        for channel_manager in self._channel_managers:
+            total += len(channel_manager._jobs_by_uuid)
+        return total
+
+    def register_metrics(self):
+        for cm in self._channel_managers:
+            cm.register_metrics()
 
     def requeue_dead_jobs(self):
         for db in self.db_by_name.values():
@@ -778,7 +789,7 @@ class QueueJobRunner:
                 with db.select_jobs("uuid = %s", (uuid,)) as cr:
                     job_datas = cr.fetchone()
                     if job_datas:
-                        channel_manager.notify(db.db_name, *job_datas)
+                        channel_manager.notify(*job_datas)
                     else:
                         channel_manager.remove_job(uuid)
 
@@ -868,6 +879,7 @@ class QueueJobRunner:
                 #       on which queue_job is installed after server start?
                 self.initialize_databases()
                 _logger.info("database connections ready")
+                self.register_metrics()
                 # inner loop does the normal processing
                 while not self._stop:
                     self.requeue_dead_jobs()

@@ -15,6 +15,7 @@ from ..job import CANCELLED, DONE, ENQUEUED, FAILED, PENDING, STARTED, WAIT_DEPE
 from . import metrics
 
 RELOAD_PAYLOAD = "reload"
+ROOT = "root"
 NOT_DONE = (WAIT_DEPENDENCIES, PENDING, ENQUEUED, STARTED, FAILED)
 JobSortingKey = namedtuple("SortingKey", "eta priority date_created seq")
 
@@ -435,12 +436,12 @@ class Channel:
         paused=False,
         capacity_default=None,
         sequential_default=False,
+        db_name=None,
     ):
         self.name = name
         self.parent = parent
         if self.parent:
             self.parent.children[name] = self
-            self.parent._register_channel_gauges()
         self.children = {}
         self._queue = ChannelQueue()
         self._running = set()
@@ -455,15 +456,17 @@ class Channel:
         self.sequential = sequential or (parent and parent.sequential_default)
         self.sequential_default = sequential_default
         self.paused = paused
-        self._metrics_labels = None
-        self._register_channel_gauges()
+        self.db_name = db_name
+        self._metrics_labels = {}  # {"channel": ..., "db": ..., "root": ..., "leaf": ...}
 
     def __del__(self):
-        self._unregister_channel_gauges()
+        self._unregister_metrics()
 
-    def _register_channel_gauges(self) -> None:
-        self._unregister_channel_gauges()
+    def register_metrics(self) -> None:
+        """Register gauges for a specific database in this channel."""
+        self._unregister_metrics()
         self._metrics_labels = {
+            "db": self.db_name,
             "channel": self.fullname,
             "root": not bool(self.parent),
             "leaf": not bool(self.children),
@@ -484,7 +487,7 @@ class Channel:
             **self._metrics_labels
         ).set_function(weakref.proxy(self)._waiting_dependencies_gauge)
 
-    def _unregister_channel_gauges(self) -> None:
+    def _unregister_metrics(self) -> None:
         if not self._metrics_labels:
             return
         metrics.channel_capacity.remove_by_labels(self._metrics_labels)
@@ -492,6 +495,7 @@ class Channel:
         metrics.channel_running.remove_by_labels(self._metrics_labels)
         metrics.channel_failed.remove_by_labels(self._metrics_labels)
         metrics.channel_waiting_dependencies.remove_by_labels(self._metrics_labels)
+        self._metrics_labels.clear()
 
     def _capacity_gauge(self) -> float:
         if self.capacity is None:
@@ -518,7 +522,7 @@ class Channel:
     def sequential(self, val):
         self._queue.sequential = val
 
-    def configure(self, config):
+    def configure(self, config, db_name=None):
         """Configure a channel from a dictionary.
 
         Supported keys are:
@@ -531,6 +535,7 @@ class Channel:
         * paused
         """
         assert self.fullname.endswith(config["name"])
+        self.db_name = db_name
         self.capacity = config.get("capacity", None)
         self.capacity_default = config.get("capacity_default", None)
         self.sequential = bool(config.get("sequential", False))
@@ -944,10 +949,13 @@ class ChannelManager:
     []
     """
 
-    def __init__(self):
+    def __init__(self, db_name=None):
         self._jobs_by_uuid = WeakValueDictionary()
-        self._root_channel = Channel(name="root", parent=None, capacity=1)
+        self._root_channel = Channel(
+            name=ROOT, parent=None, capacity=1, db_name=db_name
+        )
         self._channels_by_name = WeakValueDictionary(root=self._root_channel)
+        self.db_name = db_name
 
     @classmethod
     def parse_simple_config(cls, config_string):
@@ -1019,7 +1027,7 @@ class ChannelManager:
                     config["capacity"] = int(config_items[0])
                     config_items.pop(0)
                 except Exception as ex:
-                    if name == "root":
+                    if name == ROOT:
                         raise ValueError(
                             f"Invalid channel config {config_string}: "
                             f"invalid capacity {config_items[0]}"
@@ -1055,7 +1063,7 @@ class ChannelManager:
             res.append(config)
         return res
 
-    def simple_configure(self, config_string):
+    def simple_configure(self, config_string, db_name=None):
         """Configure the channel manager from a simple configuration string
 
         >>> cm = ChannelManager()
@@ -1120,10 +1128,11 @@ class ChannelManager:
         :param db_name: used to show the database name in the
         logs when using per-database channels
         """
+        self.db_name = db_name
         for config in configs:
-            self.get_channel_from_config(asdict(config), db_name=db_name)
+            self.get_channel_from_config(asdict(config))
 
-    def get_channel_from_config(self, config, db_name=None):
+    def get_channel_from_config(self, config):
         """Return a Channel object from a parsed configuration.
 
         If the channel does not exist it is created.
@@ -1134,9 +1143,9 @@ class ChannelManager:
         when not configured explicity).
         """
         channel = self.get_channel_by_name(config["name"], autocreate=True)
-        channel.configure(config)
-        if db_name:
-            _logger.info("Configured channel: %s (db: %s)", channel, db_name)
+        channel.configure(config, db_name=self.db_name)
+        if self.db_name:
+            _logger.info("Configured channel: %s (db: %s)", channel, self.db_name)
         else:
             _logger.info("Configured channel: %s", channel)
         return channel
@@ -1185,10 +1194,10 @@ class ChannelManager:
         >>> c.fullname
         'root.sub.sub.not.configured'
         """
-        if not channel_name or channel_name == self._root_channel.name:
+        if not channel_name or channel_name == ROOT:
             return self._root_channel
-        if not channel_name.startswith(self._root_channel.name + "."):
-            channel_name = self._root_channel.name + "." + channel_name
+        if not channel_name.startswith(ROOT + "."):
+            channel_name = ROOT + "." + channel_name
         if channel_name in self._channels_by_name:
             return self._channels_by_name[channel_name]
         if not autocreate and not parent_fallback:
@@ -1201,7 +1210,7 @@ class ChannelManager:
             parent_name = channel_name
             while True:
                 parent_name = parent_name.rsplit(".", 1)[:-1][0]
-                if parent_name == self._root_channel.name:
+                if parent_name == ROOT:
                     break
                 if parent_name in self._channels_by_name:
                     parent = self._channels_by_name[parent_name]
@@ -1214,19 +1223,19 @@ class ChannelManager:
         for subchannel_name in channel_name.split(".")[1:]:
             subchannel = parent.get_subchannel_by_name(subchannel_name)
             if not subchannel:
-                subchannel = Channel(subchannel_name, parent, capacity=None)
+                subchannel = Channel(
+                    subchannel_name, parent, capacity=None, db_name=self.db_name
+                )
                 self._channels_by_name[subchannel.fullname] = subchannel
             parent = subchannel
         return parent
 
-    def notify(
-        self, db_name, channel_name, uuid, seq, date_created, priority, eta, state
-    ):
+    def notify(self, channel_name, uuid, seq, date_created, priority, eta, state):
         channel = self.get_channel_by_name(channel_name, parent_fallback=True)
         job = self._jobs_by_uuid.get(uuid)
         if job:
             # db_name is invariant
-            assert job.db_name == db_name
+            assert job.db_name == self.db_name
             # date_created is invariant
             assert job.date_created == date_created
             # if one of the job properties that influence
@@ -1242,7 +1251,9 @@ class ChannelManager:
                 self.remove_job(uuid)
                 job = None
         if not job:
-            job = ChannelJob(db_name, channel, uuid, seq, date_created, priority, eta)
+            job = ChannelJob(
+                self.db_name, channel, uuid, seq, date_created, priority, eta
+            )
             self._jobs_by_uuid[uuid] = job
         # state transitions
         if not state or state in (DONE, CANCELLED):
@@ -1284,3 +1295,9 @@ class ChannelManager:
 
     def _jobs_to_do_gauge(self) -> float:
         return len(self._jobs_by_uuid)
+
+    def register_metrics(self):
+        for channel in self._channels_by_name.values():
+            channel.register_metrics()
+            if channel.parent:
+                channel.parent.register_metrics()
